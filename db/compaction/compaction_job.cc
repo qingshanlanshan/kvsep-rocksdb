@@ -1260,7 +1260,10 @@ void CompactionJob::ProcessKeyValueCompaction(SubcompactionState* sub_compact) {
   std::unique_ptr<BlobFileBuilder> blob_file_builder(
       (mutable_cf_options->enable_blob_files &&
        sub_compact->compaction->output_level() >=
-           mutable_cf_options->blob_file_starting_level)
+           mutable_cf_options->blob_file_starting_level &&
+       (mutable_cf_options->blob_file_ending_level < 0 ||
+        sub_compact->compaction->output_level() <=
+            mutable_cf_options->blob_file_ending_level))
           ? new BlobFileBuilder(
                 versions_, fs_.get(),
                 sub_compact->compaction->immutable_options(),
@@ -1270,7 +1273,11 @@ void CompactionJob::ProcessKeyValueCompaction(SubcompactionState* sub_compact) {
                 BlobFileCreationReason::kCompaction, &blob_file_paths,
                 sub_compact->Current().GetBlobFileAdditionsPtr())
           : nullptr);
-
+  // std::cout << "blob starting level: " << mutable_cf_options->blob_file_starting_level
+  //           << " blob ending level: " << mutable_cf_options->blob_file_ending_level
+  //           << " output level: " << sub_compact->compaction->output_level()
+  //           << " enable blob files: " << mutable_cf_options->enable_blob_files
+  //           << " blob file builder: " << (blob_file_builder ? "created" : "null") << std::endl;
   TEST_SYNC_POINT("CompactionJob::Run():Inprogress");
   TEST_SYNC_POINT_CALLBACK(
       "CompactionJob::Run():PausingManualCompaction:1",
@@ -1350,7 +1357,8 @@ void CompactionJob::ProcessKeyValueCompaction(SubcompactionState* sub_compact) {
     // and `close_file_func`.
     // TODO: it would be better to have the compaction file open/close moved
     // into `CompactionOutputs` which has the output file information.
-    status = sub_compact->AddToOutput(*c_iter, open_file_func, close_file_func);
+    status = sub_compact->AddToOutput(*c_iter, open_file_func, close_file_func, 
+              (mutable_cf_options->blob_file_ending_level > 0 && sub_compact->compaction->output_level() > mutable_cf_options->blob_file_ending_level));
     if (!status.ok()) {
       break;
     }

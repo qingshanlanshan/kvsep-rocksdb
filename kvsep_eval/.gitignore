@@ -1,0 +1,5 @@
+db/*
+log/*
+ldb*
+rw_cost_ratio_measure
+testfile.dat

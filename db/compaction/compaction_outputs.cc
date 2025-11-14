@@ -9,6 +9,10 @@
 // found in the LICENSE file. See the AUTHORS file for names of contributors.
 
 #include "db/compaction/compaction_outputs.h"
+#include "db/blob/blob_index.h"
+#include "db/blob/blob_file_reader.h"
+#include "db/blob/blob_fetcher.h"
+#include "db/blob/blob_source.h"
 
 #include "db/builder.h"
 
@@ -354,7 +358,8 @@ bool CompactionOutputs::ShouldStopBefore(const CompactionIterator& c_iter) {
 Status CompactionOutputs::AddToOutput(
     const CompactionIterator& c_iter,
     const CompactionFileOpenFunc& open_file_func,
-    const CompactionFileCloseFunc& close_file_func) {
+    const CompactionFileCloseFunc& close_file_func,
+    bool fetch_blob_value = false) {
   Status s;
   bool is_range_del = c_iter.IsDeleteRangeSentinelKey();
   if (is_range_del && compaction_->bottommost_level()) {
@@ -403,11 +408,44 @@ Status CompactionOutputs::AddToOutput(
 
   assert(builder_ != nullptr);
   const Slice& value = c_iter.value();
-  s = current_output().validator.Add(key, value);
-  if (!s.ok()) {
-    return s;
+  const ParsedInternalKey& ikey = c_iter.ikey();
+
+  // if blob index, fetch actual value
+  if (ikey.type == kTypeBlobIndex && fetch_blob_value) {
+    BlobIndex blob_index;
+    s = blob_index.DecodeFrom(value);
+    if (!s.ok()) {
+      // handle error (log or skip)
+      return s;
+    }
+
+    constexpr uint64_t* bytes_read = nullptr;
+    BlobSource* blob_source = compaction_->column_family_data()->blob_source();
+    PinnableSlice blob_value;
+    s = blob_source->GetBlob(
+        ReadOptions(), c_iter.user_key(), blob_index.file_number(),
+        blob_index.offset(), 0, blob_index.size(), blob_index.compression(),
+        nullptr /* prefetch_buffer */, &blob_value, bytes_read);
+
+
+    auto new_ikey = c_iter.ikey();
+    new_ikey.type = kTypeValue;
+    std::string new_encoded_key;
+    AppendInternalKey(&new_encoded_key, new_ikey);
+
+    s = current_output().validator.Add(new_encoded_key, blob_value);
+    if (!s.ok()) {
+      return s;
+    }
+    builder_->Add(new_encoded_key, blob_value);
   }
-  builder_->Add(key, value);
+  else {
+    s = current_output().validator.Add(key, value);
+    if (!s.ok()) {
+      return s;
+    }
+    builder_->Add(key, value);
+  }
 
   stats_.num_output_records++;
   current_output_file_size_ = builder_->EstimatedFileSize();
@@ -420,7 +458,6 @@ Status CompactionOutputs::AddToOutput(
     return s;
   }
 
-  const ParsedInternalKey& ikey = c_iter.ikey();
   s = current_output().meta.UpdateBoundaries(key, value, ikey.sequence,
                                              ikey.type);
 

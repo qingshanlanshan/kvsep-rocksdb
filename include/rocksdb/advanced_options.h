@@ -1128,6 +1128,10 @@ struct AdvancedColumnFamilyOptions {
   // Dynamically changeable through the SetOptions() API
   int blob_file_starting_level = 0;
 
+  // stop using blob files after a certain LSM tree level.
+  // use -1 to ignore this option.
+  int blob_file_ending_level = -1;
+
   // The Cache object to use for blobs. Using a dedicated object for blobs and
   // using the same object for the block and blob caches are both supported. In
   // the latter case, note that blobs are less valuable from a caching
