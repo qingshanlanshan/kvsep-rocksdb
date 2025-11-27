@@ -15,9 +15,9 @@ DEFINE_string(level_capacities, "4194304,41943040,419430400,4194304000,419430400
 DEFINE_string(run_numbers, "1,1,1,1,1", "Comma-separated list of run numbers");
 DEFINE_int32(bpk, 10, "Bits per key for filter");
 DEFINE_int32(kvsize, 1024, "Size of key-value pair");
-DEFINE_string(compaction_style, "moose", "Compaction style");
+DEFINE_string(compaction_style, "moose", "Compaction style: moose or default");
 DEFINE_int32(prepare_entries, 20000000, "Number of entries to prepare");
-DEFINE_int32(test_entries, 1000000, "Number of entries to test");
+DEFINE_int32(test_entries, 10000000, "Number of entries to test");
 DEFINE_string(workload, "prepare", "prepare or test");
 DEFINE_string(path, "/tmp/db", "dbpath");
 DEFINE_int32(blob_starting_level, -1, "blob file starting level");
@@ -96,7 +96,10 @@ struct WorkloadConfig {
   double read_ratio;
   double range_ratio;
   WorkloadConfig(const std::string& config_str) {
-    auto splits = rocksdb::StringSplit(config_str, ',');
+    auto splits = rocksdb::StringSplit(config_str, '_');
+    if (splits.size() == 1) {
+      splits = rocksdb::StringSplit(config_str, ',');
+    }
     if (splits.size() != 3) {
       std::cerr << "Invalid workload config: " << config_str << std::endl;
       exit(1);
@@ -164,6 +167,15 @@ void RunWorkload(rocksdb::DB* db, const WorkloadConfig& config) {
   }
 }
 
+void set_blob_options(rocksdb::Options& options) {
+  if (FLAGS_blob_starting_level >= 0 && (FLAGS_blob_ending_level >= FLAGS_blob_starting_level || FLAGS_blob_ending_level < 0)) {
+    options.enable_blob_files = true;
+    // options.enable_blob_garbage_collection = true;
+    options.blob_file_starting_level = FLAGS_blob_starting_level;
+    options.blob_file_ending_level = FLAGS_blob_ending_level;
+  } 
+}
+
 rocksdb::Options get_default_options() {
   rocksdb::Options options;
   options.create_if_missing = true;
@@ -181,12 +193,6 @@ rocksdb::Options get_moose_options() {
   options.create_if_missing = true;
   options.write_buffer_size = 2 << 20;
   options.level_compaction_dynamic_level_bytes = false;
-  if (FLAGS_blob_starting_level >= 0 && (FLAGS_blob_ending_level >= FLAGS_blob_starting_level || FLAGS_blob_ending_level < 0)) {
-    options.enable_blob_files = true;
-    options.enable_blob_garbage_collection = true;
-    options.blob_file_starting_level = FLAGS_blob_starting_level;
-    options.blob_file_ending_level = FLAGS_blob_ending_level;
-  } 
 
   std::vector<std::string> split_st =
       rocksdb::StringSplit(FLAGS_level_capacities, ',');
@@ -215,12 +221,15 @@ rocksdb::Options get_moose_options() {
   options.run_numbers = run_numbers;
   options.num_levels = std::accumulate(run_numbers.begin(), run_numbers.end(), 0);
 
-  // uint64_t entry_num = std::accumulate(options.level_capacities.begin() + 1, options.level_capacities.end(), 0UL) / FLAGS_kvsize;
-  // uint64_t filter_memory = entry_num * FLAGS_bpk / 8;
+  uint64_t entry_num = std::accumulate(options.level_capacities.begin() + 1, options.level_capacities.end(), 0UL) / FLAGS_kvsize;
+  uint64_t filter_memory = entry_num * FLAGS_bpk / 8;
 
   // auto tmp = rocksdb::MonkeyBpks(entry_num, filter_memory, options.level_capacities, FLAGS_kvsize);
-  // std::vector<double> bpks = {(double)FLAGS_bpk};
+  std::vector<double> bpks = {(double)FLAGS_bpk};
   // std::copy(tmp.begin(), tmp.end(), std::back_inserter(bpks));
+  for (int i = 1; i < (int)options.level_capacities.size(); i++) {
+    bpks.push_back(FLAGS_bpk);
+  }
   // display options
   std::cout << "level capacities: " << std::endl;
   for (auto lvl_cap : options.level_capacities) {
@@ -230,13 +239,13 @@ rocksdb::Options get_moose_options() {
   for (auto rn : options.run_numbers) {
     std::cout << "  " << rn << std::endl;
   }
-  // std::cout << "bpks: " << std::endl;
-  // for (auto bpk : bpks) {
-  //   std::cout << "  " << bpk << std::endl;
-  // }
+  std::cout << "bpks: " << std::endl;
+  for (auto bpk : bpks) {
+    std::cout << "  " << bpk << std::endl;
+  }
   
-  // auto table_options = options.table_factory->GetOptions<rocksdb::BlockBasedTableOptions>();
-  // table_options->filter_policy.reset(rocksdb::NewMonkeyFilterPolicy(bpks));
+  auto table_options = options.table_factory->GetOptions<rocksdb::BlockBasedTableOptions>();
+  table_options->filter_policy.reset(rocksdb::NewMonkeyFilterPolicy(bpks));
 
   return options;
 }
@@ -254,6 +263,7 @@ int main(int argc, char** argv) {
     std::cerr << "Unknown compaction style: " << FLAGS_compaction_style << std::endl;
     return 1;
   }
+  set_blob_options(options);
   if (FLAGS_workload == "test") {
     options.use_direct_io_for_flush_and_compaction = true;
     options.use_direct_reads = true;

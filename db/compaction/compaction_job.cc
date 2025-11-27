@@ -1333,6 +1333,12 @@ void CompactionJob::ProcessKeyValueCompaction(SubcompactionState* sub_compact) {
       reinterpret_cast<void*>(
           const_cast<Compaction*>(sub_compact->compaction)));
   uint64_t last_cpu_micros = prev_cpu_micros;
+  bool fetch_blob_value = mutable_cf_options->enable_blob_files &&
+                          mutable_cf_options->blob_file_starting_level >= 0 &&
+                          mutable_cf_options->blob_file_ending_level >=
+                              mutable_cf_options->blob_file_starting_level &&
+                          mutable_cf_options->blob_file_ending_level <
+                              sub_compact->compaction->output_level();
   while (status.ok() && !cfd->IsDropped() && c_iter->Valid()) {
     // Invariant: c_iter.status() is guaranteed to be OK if c_iter->Valid()
     // returns true.
@@ -1357,8 +1363,8 @@ void CompactionJob::ProcessKeyValueCompaction(SubcompactionState* sub_compact) {
     // and `close_file_func`.
     // TODO: it would be better to have the compaction file open/close moved
     // into `CompactionOutputs` which has the output file information.
-    status = sub_compact->AddToOutput(*c_iter, open_file_func, close_file_func, 
-              (mutable_cf_options->blob_file_ending_level > 0 && sub_compact->compaction->output_level() > mutable_cf_options->blob_file_ending_level));
+    status = sub_compact->AddToOutput(*c_iter, open_file_func, close_file_func,
+                                      fetch_blob_value);
     if (!status.ok()) {
       break;
     }
