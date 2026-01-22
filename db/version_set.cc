@@ -78,6 +78,8 @@
 #include "util/string_util.h"
 #include "util/user_comparator_wrapper.h"
 
+#include "db/workload_tracker.h"
+
 // Generate the regular and coroutine versions of some methods by
 // including version_set_sync_and_async.h twice
 // Macros in the header will expand differently based on whether
@@ -2460,6 +2462,8 @@ void Version::Get(const ReadOptions& read_options, const LookupKey& k,
           RecordTick(db_statistics_, GET_HIT_L2_AND_UP);
         }
 
+        global_read_hit_level.record_hit(fp.GetHitFileLevel());
+
         PERF_COUNTER_BY_LEVEL_ADD(user_key_return_count, 1,
                                   fp.GetHitFileLevel());
 
@@ -3398,7 +3402,7 @@ bool ShouldChangeFileTemperature(const ImmutableOptions& ioptions,
 }  // anonymous namespace
 
 bool VersionStorageInfo::EnableDynamicRun(int logical_level, const MutableCFOptions& options) {
-  assert(logical_level < options.run_numbers.size());
+  assert((size_t)logical_level < options.run_numbers.size());
   int start_physical_level = std::accumulate(options.run_numbers.begin(), options.run_numbers.begin() + logical_level, 0);
   if (start_physical_level - 1 <= 0) {
     return false;

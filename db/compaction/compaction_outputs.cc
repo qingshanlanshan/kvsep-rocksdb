@@ -410,36 +410,78 @@ Status CompactionOutputs::AddToOutput(
   const Slice& value = c_iter.value();
   const ParsedInternalKey& ikey = c_iter.ikey();
 
+  bool do_fetch_blob = false;
   // if blob index, fetch actual value
-  if (ikey.type == kTypeBlobIndex && fetch_blob_value) {
+  if (ikey.type == kTypeBlobIndex) {
     BlobIndex blob_index;
     s = blob_index.DecodeFrom(value);
     if (!s.ok()) {
       // handle error (log or skip)
       return s;
     }
+    
+    if (global_frequent_write_key_cache || global_frequent_read_key_cache) {
+      // frequency cache based decision
+      std::string user_key_str = c_iter.user_key().ToString();
+      bool is_write_frequent =
+          global_frequent_write_key_cache
+              ? global_frequent_write_key_cache->contains(user_key_str)
+              : false;
+      bool is_read_frequent =
+          global_frequent_read_key_cache
+              ? global_frequent_read_key_cache->contains(user_key_str)
+              : false;
 
-    constexpr uint64_t* bytes_read = nullptr;
-    BlobSource* blob_source = compaction_->column_family_data()->blob_source();
-    PinnableSlice blob_value;
-    s = blob_source->GetBlob(
-        ReadOptions(), c_iter.user_key(), blob_index.file_number(),
-        blob_index.offset(), 0, blob_index.size(), blob_index.compression(),
-        nullptr /* prefetch_buffer */, &blob_value, bytes_read);
-
-
-    auto new_ikey = c_iter.ikey();
-    new_ikey.type = kTypeValue;
-    std::string new_encoded_key;
-    AppendInternalKey(&new_encoded_key, new_ikey);
-
-    s = current_output().validator.Add(new_encoded_key, blob_value);
-    if (!s.ok()) {
-      return s;
+      if (!is_write_frequent || is_read_frequent)
+        do_fetch_blob = true;
     }
-    builder_->Add(new_encoded_key, blob_value);
+    else if (global_read_hotness_tracker && global_write_hotness_tracker) {
+      // hotness tracker + rl model based decision
+      int output_level = compaction_->output_level();
+      int total_levels = compaction_->column_family_data()->NumberLevels();
+      float output_level_ratio =
+          static_cast<float>(output_level - 2) / total_levels;
+      std::string user_key = c_iter.user_key().ToString();
+      size_t cutoff_size = 0;
+      int last_seen_level = -1;
+      std::tie(cutoff_size, last_seen_level) = get_blob_cutoff_size(output_level_ratio, user_key, 0 /* base_cutoff_size */);
+      // The key has been seen in lower levels, no need to keep this entry
+      if (last_seen_level >=0 && last_seen_level < compaction_->start_level()) {
+        return s;
+      }
+      global_write_hotness_tracker->record_level(user_key, output_level);
+      if (blob_index.size() > cutoff_size) {
+        do_fetch_blob = true;
+      }
+    }
+    else if (fetch_blob_value) {
+      // simple level based decision
+      do_fetch_blob = true;
+    } 
+
+    if (do_fetch_blob) {
+      constexpr uint64_t* bytes_read = nullptr;
+      BlobSource* blob_source =
+          compaction_->column_family_data()->blob_source();
+      PinnableSlice blob_value;
+      s = blob_source->GetBlob(
+          ReadOptions(), c_iter.user_key(), blob_index.file_number(),
+          blob_index.offset(), 0, blob_index.size(), blob_index.compression(),
+          nullptr /* prefetch_buffer */, &blob_value, bytes_read);
+
+      auto new_ikey = c_iter.ikey();
+      new_ikey.type = kTypeValue;
+      std::string new_encoded_key;
+      AppendInternalKey(&new_encoded_key, new_ikey);
+
+      s = current_output().validator.Add(new_encoded_key, blob_value);
+      if (!s.ok()) {
+        return s;
+      }
+      builder_->Add(new_encoded_key, blob_value);
+    }
   }
-  else {
+  if (!do_fetch_blob) {
     s = current_output().validator.Add(key, value);
     if (!s.ok()) {
       return s;

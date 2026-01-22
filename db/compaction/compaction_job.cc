@@ -57,6 +57,8 @@
 #include "test_util/sync_point.h"
 #include "util/stop_watch.h"
 
+#include "db/workload_tracker.h"
+
 namespace ROCKSDB_NAMESPACE {
 
 const char* GetCompactionReasonString(CompactionReason compaction_reason) {
@@ -1333,12 +1335,11 @@ void CompactionJob::ProcessKeyValueCompaction(SubcompactionState* sub_compact) {
       reinterpret_cast<void*>(
           const_cast<Compaction*>(sub_compact->compaction)));
   uint64_t last_cpu_micros = prev_cpu_micros;
-  bool fetch_blob_value = mutable_cf_options->enable_blob_files &&
+  global_rl_stats.mark_compaction(compact_->compaction->output_level());
+  bool force_fetch_blob_value = mutable_cf_options->enable_blob_files &&
                           mutable_cf_options->blob_file_starting_level >= 0 &&
-                          mutable_cf_options->blob_file_ending_level >=
-                              mutable_cf_options->blob_file_starting_level &&
-                          mutable_cf_options->blob_file_ending_level <
-                              sub_compact->compaction->output_level();
+                          mutable_cf_options->blob_file_ending_level >= mutable_cf_options->blob_file_starting_level &&
+                          mutable_cf_options->blob_file_ending_level < sub_compact->compaction->output_level();
   while (status.ok() && !cfd->IsDropped() && c_iter->Valid()) {
     // Invariant: c_iter.status() is guaranteed to be OK if c_iter->Valid()
     // returns true.
@@ -1364,7 +1365,7 @@ void CompactionJob::ProcessKeyValueCompaction(SubcompactionState* sub_compact) {
     // TODO: it would be better to have the compaction file open/close moved
     // into `CompactionOutputs` which has the output file information.
     status = sub_compact->AddToOutput(*c_iter, open_file_func, close_file_func,
-                                      fetch_blob_value);
+                                      force_fetch_blob_value);
     if (!status.ok()) {
       break;
     }

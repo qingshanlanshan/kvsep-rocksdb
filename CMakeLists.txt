@@ -687,6 +687,7 @@ set(SOURCES
         db/flush_job.cc
         db/flush_scheduler.cc
         db/forward_iterator.cc
+        db/workload_tracker.cc
         db/import_column_family_job.cc
         db/internal_stats.cc
         db/logs_with_prep_tracker.cc
