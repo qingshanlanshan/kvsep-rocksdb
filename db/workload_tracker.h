@@ -16,7 +16,11 @@
 #include <atomic>
 #include <cassert>
 #include <shared_mutex>
+#include "rocksdb/cache.h"
+#include "rocksdb/advanced_cache.h"
 
+#define OWN_CACHE_IMPL false
+#define LRU_KEY_TYPE size_t
 namespace ROCKSDB_NAMESPACE {
 
 struct ReadHitLevel {
@@ -655,6 +659,7 @@ private:
 };
 extern KvSepThresholdModel global_kvsep_model;
 
+#if OWN_CACHE_IMPL
 class LRU {
 public:
     explicit LRU(size_t capacity) : capacity_(capacity), head_(nullptr), tail_(nullptr) {}
@@ -669,15 +674,16 @@ public:
     }
 
     std::string access(const std::string& key) {
-      auto it = map_.find(key);
+      LRU_KEY_TYPE ikey = string_to_lru_key_type(key);
+      auto it = map_.find(ikey);
       if (it != map_.end()) {
         Node* node = it->second;
         remove(node);
         insert_at_front(node);
       } else {
-        Node* new_node = new Node(key);
+        Node* new_node = new Node(ikey);
         insert_at_front(new_node);
-        map_[key] = new_node;
+        map_[ikey] = new_node;
 
         if (map_.size() > capacity_) {
           // Evict least recently used
@@ -687,19 +693,20 @@ public:
           auto node = tail_;
           remove(node);
           delete node;
-          return result;
+          return lru_key_type_to_string(result);
         }
       }
       return "";
     }
 
-    bool contains(const std::string& key) const {
-        return map_.find(key) != map_.end();
+    bool contains(const std::string& key) {
+        LRU_KEY_TYPE ikey = string_to_lru_key_type(key);
+        return map_.find(ikey) != map_.end();
     }
 
-    std::string peek_tail() const {
+    std::string peek_tail() {
         if (tail_) {
-            return tail_->key;
+            return lru_key_type_to_string(tail_->key);
         }
         return "";
     }
@@ -708,15 +715,29 @@ public:
         return map_.size() >= capacity_;
     }
 private:
+    LRU_KEY_TYPE string_to_lru_key_type(std::string str) {
+      return std::stoull(str);
+    }
+
+    std::string lru_key_type_to_string(LRU_KEY_TYPE key) {
+      std::string key_str = std::to_string(key);
+      if (16 <= key_str.size()) {
+        return key_str;
+      }
+      std::string padding_str(16 - key_str.size(), '0');
+      key_str = padding_str + key_str;
+      return key_str;
+    }
+
     struct Node {
-        std::string key;
+        LRU_KEY_TYPE key;
         Node* prev;
         Node* next;
-        Node(const std::string& k) : key(k), prev(nullptr), next(nullptr) {}
+        Node(const LRU_KEY_TYPE& k) : key(k), prev(nullptr), next(nullptr) {}
     };
 
     size_t capacity_;
-    std::unordered_map<std::string, Node*> map_;
+    std::unordered_map<LRU_KEY_TYPE, Node*> map_;
     Node* head_;
     Node* tail_;
 
@@ -770,7 +791,7 @@ public:
             return probationary_.access(key);
         }
     }
-    bool contains(const std::string& key) const {
+    bool contains(const std::string& key) {
         return protected_.contains(key) || probationary_.contains(key);
     }
 
@@ -789,7 +810,6 @@ private:
     LRU probationary_;
 };
 
-#if true
 class TinyLFU {
 public:
   TinyLFU(size_t capacity, float window_fraction = 0.01f)
@@ -807,9 +827,22 @@ public:
     }
   }
 
-  bool contains(const std::string& key) const {
+  bool contains(const std::string& key) {
     std::shared_lock<std::shared_mutex> lock(mutex_);
-    return main_cache_.contains(key) || window_cache_.contains(key);
+    auto start = std::chrono::high_resolution_clock::now();
+    bool ret = main_cache_.contains(key) || window_cache_.contains(key);
+    auto end = std::chrono::high_resolution_clock::now();
+    std::chrono::duration<double, std::micro> duration = end - start;
+    metrics_.access_time_us += static_cast<size_t>(duration.count());
+    metrics_.access_count++;
+    return ret;
+  }
+
+  void report() {
+    std::cout << "contains() statistics: Duration " << metrics_.access_time_us
+              << " count " << metrics_.access_count
+              << " avg " << (float) metrics_.access_time_us / metrics_.access_count 
+              << std::endl;
   }
 
 private:
@@ -817,6 +850,11 @@ private:
   SLRU main_cache_;
   std::unordered_map<std::string, int> frequency_table_;
   mutable std::shared_mutex mutex_;
+
+  struct Metrics {
+    size_t access_time_us = 0;
+    size_t access_count = 0;
+  } metrics_;
 
   std::string access_no_lock_(const std::string& key) {
     if (main_cache_.contains(key)) {
@@ -858,64 +896,13 @@ private:
     }
   }
 };
-#else
-class TinyLFU { 
-public:
-  TinyLFU(size_t capacity, float window_fraction = 0.01f)
-      : window_cache_(static_cast<size_t>(capacity * window_fraction)),
-        main_cache_(capacity -
-                    static_cast<size_t>(capacity * window_fraction)) {}
-  std::string access(const std::string& key) {
-    // std::lock_guard<std::mutex> lock(mutex_);
-    if (main_cache_.contains(key)) {
-      main_cache_.access(key);
-      return "";
-    } else if (window_cache_.contains(key)) {
-      window_cache_.access(key);
-      frequency_table_[key]++;
-      return "";
-    } else {
-      auto window_victim = window_cache_.access(key);
-      frequency_table_[key] = 1;
-      if (window_victim.empty()) return "";
-      if (!main_cache_.is_full()) {
-        return main_cache_.access(window_victim);
-      }
-      auto main_victim = main_cache_.peek_tail();
-      if (frequency_table_[window_victim] > frequency_table_[main_victim]) {
-        return main_cache_.access(window_victim);
-      }
-      return window_victim;
-    }
-    if (frequency_table_[key] > 8) {
-      reset_frequency();
-    }
-  }
-  bool contains(const std::string& key) const {
-    // std::lock_guard<std::mutex> lock(mutex_);
-    return main_cache_.contains(key) || window_cache_.contains(key);
-  }
-
- private:
-  LRU window_cache_;
-  SLRU main_cache_;
-  std::unordered_map<std::string, int> frequency_table_;
-  mutable std::mutex mutex_;
-  void reset_frequency() {
-    for (auto it = frequency_table_.begin(); it != frequency_table_.end();) {
-      it->second /= 2;  // halve frequency
-      if (it->second == 0) {
-        it = frequency_table_.erase(it);
-      } else {
-        ++it;
-      }
-    }
-  }
-};
-#endif
 extern TinyLFU* global_frequent_write_key_cache;
 extern TinyLFU* global_frequent_read_key_cache;
-
+#else
+extern std::shared_ptr<Cache> global_frequent_write_key_cache;
+extern std::shared_ptr<Cache> global_frequent_read_key_cache;
+extern rocksdb::Cache::CacheItemHelper* global_cache_item_helper;
+#endif
 struct FetchBlobCompaction {
 void compact_file_and_fetch_blob_value(rocksdb::DB* db, std::vector<std::string>& files, std::vector<std::string>& user_keys, int level) {
   std::lock_guard<std::mutex> lock(mutex_);

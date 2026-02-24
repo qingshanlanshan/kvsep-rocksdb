@@ -14,6 +14,9 @@
 
 #include "test_helper.h"
 #include "db/workload_tracker.h"
+#include "rocksdb/cache.h"
+#include "cache/lru_cache.h"
+#include "rocksdb/advanced_cache.h"
 
 DEFINE_string(level_capacities, "4194304,41943040,419430400,4194304000,41943040000", "Comma-separated list of level capacities");
 DEFINE_string(run_numbers, "1,1,1,1,1", "Comma-separated list of run numbers");
@@ -178,8 +181,6 @@ void RunWorkload(rocksdb::DB* db, const WorkloadConfig& config) {
   double op_time;
   OperationType op_type;
   std::string key_str;
-  std::vector<std::string> read_keys;
-  std::vector<std::string> write_keys;
 
   while (idx < FLAGS_test_entries) {
     double p = static_cast<double>(rand()) / RAND_MAX;
@@ -234,26 +235,23 @@ void RunWorkload(rocksdb::DB* db, const WorkloadConfig& config) {
     
     if (FLAGS_write_frequency_cache || FLAGS_read_frequency_cache)
     {
-      // frequency cache operations
-      if (op_type == OperationType::GET) {
-        read_keys.push_back(key_str);
-      }
-      else if (op_type == OperationType::PUT) {
-        write_keys.push_back(key_str);
-      }
-
-      if (idx % 1000 == 0) {
-        db->WaitForCompact(rocksdb::WaitForCompactOptions());
+        // db->WaitForCompact(rocksdb::WaitForCompactOptions());
+        rocksdb::Slice key_slice(key_str);
+        
         if (FLAGS_write_frequency_cache) {
-          rocksdb::global_frequent_write_key_cache->access(write_keys);
-          write_keys.clear();
+          #if OWN_CACHE_IMPL
+          rocksdb::global_frequent_write_key_cache->access(key_str);
+          #else
+          rocksdb::global_frequent_write_key_cache->Insert(key_slice, nullptr, rocksdb::global_cache_item_helper, 1);
+          #endif
         }
         if (FLAGS_read_frequency_cache) {
-          rocksdb::global_frequent_read_key_cache->access(read_keys);
-          read_keys.clear();
+          #if OWN_CACHE_IMPL
+          rocksdb::global_frequent_read_key_cache->access(key_str);
+          #else
+          rocksdb::global_frequent_read_key_cache->Insert(key_slice, nullptr, rocksdb::global_cache_item_helper, 1);
+          #endif
         }
-      }
-        
     }
     else if (FLAGS_hotness_tracking)
     {
@@ -284,10 +282,13 @@ void RunWorkload(rocksdb::DB* db, const WorkloadConfig& config) {
       }
     }
   }
+  // rocksdb::global_frequent_write_key_cache->report();
 }
 
 void set_blob_options(rocksdb::Options& options) {
-  if (FLAGS_blob_starting_level >= 0 && (FLAGS_blob_ending_level >= FLAGS_blob_starting_level || FLAGS_blob_ending_level < 0)) {
+  if (FLAGS_blob_starting_level >= 0 &&
+      (FLAGS_blob_ending_level >= FLAGS_blob_starting_level ||
+       FLAGS_blob_ending_level < 0)) {
     options.enable_blob_files = true;
     if (FLAGS_enable_gc) {
       options.enable_blob_garbage_collection = true;
@@ -299,11 +300,26 @@ void set_blob_options(rocksdb::Options& options) {
       options.min_blob_size = FLAGS_min_blob_size;
     }
     
+    if (FLAGS_workload == "prepare") {
+      FLAGS_read_frequency_cache = false;
+      FLAGS_write_frequency_cache = false;
+      FLAGS_hotness_tracking = false;
+    }
+
+    rocksdb::global_cache_item_helper = new rocksdb::Cache::CacheItemHelper();
     if (FLAGS_write_frequency_cache) {
+      #if OWN_CACHE_IMPL
       rocksdb::global_frequent_write_key_cache = new rocksdb::TinyLFU((size_t)1e6);
+      #else
+      rocksdb::global_frequent_write_key_cache = rocksdb::NewLRUCache((size_t)1e6);
+      #endif
     }
     if (FLAGS_read_frequency_cache) {
+      #if OWN_CACHE_IMPL
       rocksdb::global_frequent_read_key_cache = new rocksdb::TinyLFU((size_t)1e6);
+      #else
+      rocksdb::global_frequent_read_key_cache = rocksdb::NewLRUCache((size_t)1e6);
+      #endif
     }
     if (FLAGS_write_frequency_cache || FLAGS_read_frequency_cache) {
       FLAGS_hotness_tracking = false;
@@ -311,7 +327,7 @@ void set_blob_options(rocksdb::Options& options) {
       rocksdb::global_read_hotness_tracker = new rocksdb::HotKeyTracker(1 << 20);
       rocksdb::global_write_hotness_tracker = new rocksdb::HotKeyTracker(1 << 20);
     }
-  } 
+  }
 }
 
 rocksdb::Options get_default_options() {

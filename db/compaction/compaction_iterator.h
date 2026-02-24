@@ -289,7 +289,7 @@ class CompactionIterator {
   // with the corresponding blob reference if it has been actually written to a
   // blob file (i.e. if it passed the value size check). Returns true if the
   // value got extracted to a blob file, false otherwise.
-  bool ExtractLargeValueIfNeededImpl();
+  bool ExtractLargeValueIfNeededImpl(bool freq_check = false);
 
   // Extracts large values as described above, and updates the internal key's
   // type to kTypeBlobIndex if the value got extracted. Should only be called

@@ -411,6 +411,7 @@ Status CompactionOutputs::AddToOutput(
   const ParsedInternalKey& ikey = c_iter.ikey();
 
   bool do_fetch_blob = false;
+#if false
   // if blob index, fetch actual value
   if (ikey.type == kTypeBlobIndex) {
     BlobIndex blob_index;
@@ -419,8 +420,7 @@ Status CompactionOutputs::AddToOutput(
       // handle error (log or skip)
       return s;
     }
-    
-    if (global_frequent_write_key_cache || global_frequent_read_key_cache) {
+  if (global_frequent_write_key_cache || global_frequent_read_key_cache) {
       // frequency cache based decision
       std::string user_key_str = c_iter.user_key().ToString();
       bool is_write_frequent =
@@ -433,6 +433,8 @@ Status CompactionOutputs::AddToOutput(
               : false;
 
       if (!is_write_frequent || is_read_frequent)
+        do_fetch_blob = true;
+      else if (blob_index.size() < 128)
         do_fetch_blob = true;
     }
     else if (global_read_hotness_tracker && global_write_hotness_tracker) {
@@ -457,7 +459,7 @@ Status CompactionOutputs::AddToOutput(
     else if (fetch_blob_value) {
       // simple level based decision
       do_fetch_blob = true;
-    } 
+    }
 
     if (do_fetch_blob) {
       constexpr uint64_t* bytes_read = nullptr;
@@ -481,6 +483,7 @@ Status CompactionOutputs::AddToOutput(
       builder_->Add(new_encoded_key, blob_value);
     }
   }
+#endif
   if (!do_fetch_blob) {
     s = current_output().validator.Add(key, value);
     if (!s.ok()) {

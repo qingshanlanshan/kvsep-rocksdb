@@ -20,6 +20,7 @@
 #include "rocksdb/listener.h"
 #include "table/internal_iterator.h"
 #include "test_util/sync_point.h"
+#include "db/workload_tracker.h"
 
 namespace ROCKSDB_NAMESPACE {
 CompactionIterator::CompactionIterator(
@@ -1064,9 +1065,38 @@ void CompactionIterator::NextFromInput() {
   }
 }
 
-bool CompactionIterator::ExtractLargeValueIfNeededImpl() {
+bool CompactionIterator::ExtractLargeValueIfNeededImpl(bool freq_check) {
   if (!blob_file_builder_) {
     return false;
+  }
+  
+  // JIARUI: frequency check for keys during flush
+  // check for memtable flush only, compaction_ is null if flush
+  if (freq_check && !compaction_ &&
+      (global_frequent_write_key_cache || global_frequent_read_key_cache)) {
+    #if OWN_CACHE_IMPL
+    std::string user_key_str = user_key().ToString();
+    bool is_write_frequent =
+        global_frequent_write_key_cache
+            ? global_frequent_write_key_cache->contains(user_key_str)
+            : false;
+    bool is_read_frequent =
+        global_frequent_read_key_cache
+            ? global_frequent_read_key_cache->contains(user_key_str)
+            : true;
+    #else
+    bool is_write_frequent = 
+        global_frequent_write_key_cache
+            ? (global_frequent_write_key_cache->Lookup(user_key()) != nullptr)
+            : false;
+    bool is_read_frequent =
+        global_frequent_read_key_cache
+            ? (global_frequent_read_key_cache->Lookup(user_key()) != nullptr)
+            : true;
+    #endif
+    if (!is_write_frequent && is_read_frequent) {
+      return false;
+    }
   }
 
   blob_index_.clear();
@@ -1091,7 +1121,7 @@ bool CompactionIterator::ExtractLargeValueIfNeededImpl() {
 void CompactionIterator::ExtractLargeValueIfNeeded() {
   assert(ikey_.type == kTypeValue);
 
-  if (!ExtractLargeValueIfNeededImpl()) {
+  if (!ExtractLargeValueIfNeededImpl(true)) {
     return;
   }
 

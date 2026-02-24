@@ -180,7 +180,7 @@ Status BuildTable(
         env, ucmp, ioptions.merge_operator.get(), compaction_filter.get(),
         ioptions.logger, true /* internal key corruption is not ok */,
         snapshots.empty() ? 0 : snapshots.back(), snapshot_checker);
-
+// JIARUI: Blob file builder creation for memtable flush
     std::unique_ptr<BlobFileBuilder> blob_file_builder(
         (mutable_cf_options.enable_blob_files &&
          tboptions.level_at_creation >=
