@@ -34,10 +34,9 @@ DEFINE_int32(blob_ending_level, -1, "blob file ending level");
 DEFINE_string(workload_config,"0.5,0.5,0","Comma-separated list of workload config: write_ratio, read_ratio, range_ratio");
 DEFINE_bool(value_uniform_dist, false, "Use uniform distribution for value size");
 DEFINE_bool(key_zipf_dist, false, "Use zipf distribution for key selection");
-DEFINE_bool(hotness_tracking, false, "Enable hotness tracking");
 DEFINE_int32(min_blob_size, 0, "Minimum blob size");
-DEFINE_bool(write_frequency_cache, false, "Use frequency cache for writes");
-DEFINE_bool(read_frequency_cache, false, "Use frequency cache for reads");
+DEFINE_string(hotness_tracking, "none", "Hotness tracking method: none, cache, cms");
+DEFINE_bool(direct_read, false, "Use direct IO for reads");
 
 #define RAND_SEED 12345
 double duration = 0.0;
@@ -63,7 +62,7 @@ class KeyGenerator {
   KeyGenerator() {}
   KeyGenerator(uint64_t start, uint64_t end, uint64_t key_size,
                uint64_t value_size, bool shuffle = true, 
-               bool key_zipf_dist = false, bool value_uniform_dist = false) {
+               bool key_zipf_dist = false, bool value_uniform_dist = false, int seed = RAND_SEED) {
     start_ = start;
     end_ = end;
     idx_ = 0;
@@ -72,10 +71,10 @@ class KeyGenerator {
     shuffle_ = shuffle;
 
     if (key_zipf_dist) {
-      key_gen_zipf_ = new ZipfGenerator(start, end - 1, 0.9, RAND_SEED);
+      key_gen_zipf_ = new ZipfGenerator(start, end - 1, 0.9, seed);
     }
     if (value_uniform_dist) {
-      value_gen_uniform_ = new UniformIntGenerator(value_size / 40, value_size * 2, RAND_SEED);
+      value_gen_uniform_ = new UniformIntGenerator(value_size / 40, value_size * 2, seed);
     }
   }
   std::string Key() const { 
@@ -124,7 +123,7 @@ class KeyGenerator {
 void PrepareDB(rocksdb::DB* db) {
   rocksdb::WriteOptions write_options;
   rocksdb::ReadOptions read_options;
-  KeyGenerator key_gen(0, FLAGS_prepare_entries, 24, FLAGS_kvsize - 24, /*shuffle=*/true, /*key_zipf_dist=*/false, FLAGS_value_uniform_dist);
+  KeyGenerator key_gen(0, FLAGS_prepare_entries, 24, FLAGS_kvsize - 24, /*shuffle=*/true, /*key_zipf_dist=*/false, FLAGS_value_uniform_dist, RAND_SEED);
   key_gen.SeekToFirst();
   int idx = 0;
   while (key_gen.Next()) {
@@ -173,8 +172,8 @@ void RunWorkload(rocksdb::DB* db, const WorkloadConfig& config) {
            <<", read_ratio="<<config.read_ratio
            <<", range_ratio="<<config.range_ratio
            <<std::endl;
-  KeyGenerator read_key_gen(0, FLAGS_prepare_entries, 24, FLAGS_kvsize - 24, /*shuffle=*/true , FLAGS_key_zipf_dist, FLAGS_value_uniform_dist);
-  KeyGenerator write_key_gen(0, FLAGS_prepare_entries, 24, FLAGS_kvsize - 24, /*shuffle=*/true , FLAGS_key_zipf_dist, FLAGS_value_uniform_dist);
+  KeyGenerator read_key_gen(0, FLAGS_prepare_entries, 24, FLAGS_kvsize - 24, /*shuffle=*/true , FLAGS_key_zipf_dist, FLAGS_value_uniform_dist, 54321);
+  KeyGenerator write_key_gen(0, FLAGS_prepare_entries, 24, FLAGS_kvsize - 24, /*shuffle=*/true , FLAGS_key_zipf_dist, FLAGS_value_uniform_dist, 12345);
   read_key_gen.SeekToFirst();
   write_key_gen.SeekToFirst();
   int idx = 0;
@@ -233,56 +232,38 @@ void RunWorkload(rocksdb::DB* db, const WorkloadConfig& config) {
     duration += op_time;
     idx++;
     
-    if (FLAGS_write_frequency_cache || FLAGS_read_frequency_cache)
-    {
-        // db->WaitForCompact(rocksdb::WaitForCompactOptions());
+    if (FLAGS_hotness_tracking == "cache") {
         rocksdb::Slice key_slice(key_str);
-        
-        if (FLAGS_write_frequency_cache) {
-          #if OWN_CACHE_IMPL
-          rocksdb::global_frequent_write_key_cache->access(key_str);
-          #else
+        if (op_type == OperationType::PUT)
           rocksdb::global_frequent_write_key_cache->Insert(key_slice, nullptr, rocksdb::global_cache_item_helper, 1);
-          #endif
-        }
-        if (FLAGS_read_frequency_cache) {
-          #if OWN_CACHE_IMPL
-          rocksdb::global_frequent_read_key_cache->access(key_str);
-          #else
+        else if (op_type == OperationType::GET)
           rocksdb::global_frequent_read_key_cache->Insert(key_slice, nullptr, rocksdb::global_cache_item_helper, 1);
-          #endif
-        }
     }
-    else if (FLAGS_hotness_tracking)
-    {
-      if (op_type == OperationType::GET) {
-        rocksdb::global_read_hotness_tracker->update(key_str);
-        rocksdb::global_rl_stats.record_read(op_time);
-      } else if (op_type == OperationType::PUT) {
-        rocksdb::global_write_hotness_tracker->update(key_str);
-        rocksdb::global_rl_stats.record_write(op_time, key_str.size());
-      } else if (op_type == OperationType::SCAN) {
-        rocksdb::global_rl_stats.record_scan(op_time, 16);
-      }
-
-      if (idx % 100000 == 0) {
-        rocksdb::LearningStats::Snapshot snap;
-        if (rocksdb::global_rl_stats.take_snapshot_if_ready(&snap)) {
-          rocksdb::global_kvsep_model.update_from_snapshot(snap);
-        }
+    else if (FLAGS_hotness_tracking == "cms") {
+      if (op_type == OperationType::PUT) {
+        rocksdb::global_write_frequency_tracker->update(key_str);
+      } else if (op_type == OperationType::GET) {
+        rocksdb::global_read_frequency_tracker->update(key_str);
       }
     }
 
-    if (idx % 100000 == 0) {
-      std::cout << "conducted " << idx << " operations";
+    if (op_type == OperationType::PUT) {
+      rocksdb::global_learning_stats.record_write(op_time);
+    } else if (op_type == OperationType::GET) {
+      rocksdb::global_learning_stats.record_read(op_time);
+    }
+
+    if (idx % 1000000 == 0) {
+      std::cout << "\nConducted " << idx << " operations";
       std::cout << ", avg latency: " << (duration / idx) << " us" << std::endl;
-      if (FLAGS_hotness_tracking) {
-        rocksdb::global_read_hotness_tracker->report();
-        rocksdb::global_write_hotness_tracker->report();
+      if (rocksdb::global_kv_sep_policy) {
+        rocksdb::global_kv_sep_policy->Report();
       }
+      rocksdb::global_learning_stats.record_compaction_read_bytes(db);
+      rocksdb::global_learning_stats.report();
+      rocksdb::global_learning_stats.reset();
     }
   }
-  // rocksdb::global_frequent_write_key_cache->report();
 }
 
 void set_blob_options(rocksdb::Options& options) {
@@ -301,31 +282,28 @@ void set_blob_options(rocksdb::Options& options) {
     }
     
     if (FLAGS_workload == "prepare") {
-      FLAGS_read_frequency_cache = false;
-      FLAGS_write_frequency_cache = false;
-      FLAGS_hotness_tracking = false;
+      FLAGS_hotness_tracking = "none";
     }
 
-    rocksdb::global_cache_item_helper = new rocksdb::Cache::CacheItemHelper();
-    if (FLAGS_write_frequency_cache) {
-      #if OWN_CACHE_IMPL
-      rocksdb::global_frequent_write_key_cache = new rocksdb::TinyLFU((size_t)1e6);
-      #else
+    if (FLAGS_hotness_tracking == "cache") {
+      rocksdb::global_cache_item_helper = new rocksdb::Cache::CacheItemHelper();
       rocksdb::global_frequent_write_key_cache = rocksdb::NewLRUCache((size_t)1e6);
-      #endif
+      rocksdb::global_frequent_read_key_cache = rocksdb::NewLRUCache((size_t)1e5);
     }
-    if (FLAGS_read_frequency_cache) {
-      #if OWN_CACHE_IMPL
-      rocksdb::global_frequent_read_key_cache = new rocksdb::TinyLFU((size_t)1e6);
-      #else
-      rocksdb::global_frequent_read_key_cache = rocksdb::NewLRUCache((size_t)1e6);
-      #endif
-    }
-    if (FLAGS_write_frequency_cache || FLAGS_read_frequency_cache) {
-      FLAGS_hotness_tracking = false;
-    } else if (FLAGS_hotness_tracking) {
-      rocksdb::global_read_hotness_tracker = new rocksdb::HotKeyTracker(1 << 20);
-      rocksdb::global_write_hotness_tracker = new rocksdb::HotKeyTracker(1 << 20);
+    else if (FLAGS_hotness_tracking == "cms") {
+      rocksdb::global_read_frequency_tracker = new rocksdb::RotateCMS(10000, 4);
+      rocksdb::global_write_frequency_tracker = new rocksdb::RotateCMS(10000, 4);
+
+      static constexpr std::array<double, rocksdb::FreqBucketer::kNumThresholds>
+          kReadThresh = {1e-5, 5e-5, 1e-4, 5e-4, 1e-3};
+      static constexpr std::array<double, rocksdb::FreqBucketer::kNumThresholds>
+          kWriteThresh = {1e-5, 5e-5, 1e-4, 5e-4, 1e-3};
+      rocksdb::global_kv_sep_policy = new rocksdb::KvSeparationPolicy(
+          rocksdb::global_read_frequency_tracker,
+          rocksdb::global_write_frequency_tracker,
+          kReadThresh,
+          kWriteThresh);
+      rocksdb::global_kv_sep_policy->SetExploration(/*epsilon_ppm=*/5000, /*min_bucket_hits=*/2000);
     }
   }
 }
@@ -422,7 +400,7 @@ int main(int argc, char** argv) {
   options.max_background_jobs = 16;
   if (FLAGS_workload == "test") {
     options.use_direct_io_for_flush_and_compaction = true;
-    // options.use_direct_reads = true;
+    if (FLAGS_direct_read) options.use_direct_reads = true;
   }
   options.level0_slowdown_writes_trigger = 4;
   options.level0_stop_writes_trigger = 8;
@@ -432,6 +410,7 @@ int main(int argc, char** argv) {
     std::cerr << "Failed to open db: " << status.ToString() << std::endl;
     return 1;
   }
+  db->WaitForCompact(rocksdb::WaitForCompactOptions());
   if (FLAGS_workload == "prepare") {
     PrepareDB(db);
   } else if (FLAGS_workload == "test") {
@@ -446,7 +425,7 @@ int main(int argc, char** argv) {
   db->GetProperty("rocksdb.stats", &stat);
   std::cout << stat << std::endl;
   std::cout << "statistics: " << options.statistics->ToString() << std::endl;
-
+  db->WaitForCompact(rocksdb::WaitForCompactOptions());
   db->Close();
   delete db;
   return 0;

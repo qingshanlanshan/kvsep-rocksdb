@@ -250,8 +250,7 @@ class CompactionOutputs {
   // close and open new compaction output with the functions provided.
   Status AddToOutput(const CompactionIterator& c_iter,
                      const CompactionFileOpenFunc& open_file_func,
-                     const CompactionFileCloseFunc& close_file_func,
-                     bool fetch_blob_value);
+                     const CompactionFileCloseFunc& close_file_func);
 
   // Close the current output. `open_file_func` is needed for creating new file
   // for range-dels only output file.
@@ -293,25 +292,6 @@ class CompactionOutputs {
       std::unique_ptr<CompactionRangeDelAggregator>&& range_del_agg) {
     assert(range_del_agg_ == nullptr);
     range_del_agg_ = std::move(range_del_agg);
-  }
-
-  std::pair<size_t, int> get_blob_cutoff_size(float output_level_ratio, Slice user_key, int base_cutoff_size) {
-    if (!global_read_hotness_tracker || !global_write_hotness_tracker) {
-      return {base_cutoff_size, -1};
-    }
-    std::string key = user_key.ToString();
-    // get hotness
-    double read_hotness, write_hotness;
-    int last_seen_level;
-    std::tie(write_hotness, last_seen_level) =
-        global_write_hotness_tracker->hotness(key);
-    std::tie(read_hotness, std::ignore) =
-        global_read_hotness_tracker->hotness(key);
-
-    size_t result = 0;
-    result = global_kvsep_model.get_threshold_bytes(read_hotness, write_hotness, output_level_ratio);
-    result = std::clamp(result, (size_t)base_cutoff_size, (size_t)4096);
-    return {result, last_seen_level};
   }
 
   const Compaction* compaction_;

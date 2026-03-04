@@ -190,8 +190,7 @@ class SubcompactionState {
   // Add compaction_iterator key/value to the `Current` output group.
   Status AddToOutput(const CompactionIterator& iter,
                      const CompactionFileOpenFunc& open_file_func,
-                     const CompactionFileCloseFunc& close_file_func,
-                     bool fetch_blob_value);
+                     const CompactionFileCloseFunc& close_file_func);
 
   // Close all compaction output files, both output_to_penultimate_level outputs
   // and normal outputs.

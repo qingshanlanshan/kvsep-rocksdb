@@ -33,6 +33,12 @@ class BlobFileCompletionCallback;
 
 class BlobFileBuilder {
  public:
+  enum class AddOptions {
+    kDefault = 0, // allow small blobs
+    kForceKeepValue = 1,
+    kForceExtractValue = 2,
+  };
+ public:
   BlobFileBuilder(VersionSet* versions, FileSystem* fs,
                   const ImmutableOptions* immutable_options,
                   const MutableCFOptions* mutable_cf_options,
@@ -68,7 +74,7 @@ class BlobFileBuilder {
 
   ~BlobFileBuilder();
 
-  Status Add(const Slice& key, const Slice& value, std::string* blob_index);
+  Status Add(const Slice& key, const Slice& value, std::string* blob_index, AddOptions options = AddOptions::kDefault);
   Status Finish();
   void Abandon(const Status& s);
 

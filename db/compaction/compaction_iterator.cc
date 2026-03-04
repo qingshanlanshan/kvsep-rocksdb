@@ -1072,51 +1072,44 @@ bool CompactionIterator::ExtractLargeValueIfNeededImpl(bool freq_check) {
   
   // JIARUI: frequency check for keys during flush
   // check for memtable flush only, compaction_ is null if flush
-  if (freq_check && !compaction_ &&
-      (global_frequent_write_key_cache || global_frequent_read_key_cache)) {
-    #if OWN_CACHE_IMPL
-    std::string user_key_str = user_key().ToString();
-    bool is_write_frequent =
-        global_frequent_write_key_cache
-            ? global_frequent_write_key_cache->contains(user_key_str)
-            : false;
-    bool is_read_frequent =
-        global_frequent_read_key_cache
-            ? global_frequent_read_key_cache->contains(user_key_str)
-            : true;
-    #else
-    bool is_write_frequent = 
-        global_frequent_write_key_cache
-            ? (global_frequent_write_key_cache->Lookup(user_key()) != nullptr)
-            : false;
-    bool is_read_frequent =
-        global_frequent_read_key_cache
-            ? (global_frequent_read_key_cache->Lookup(user_key()) != nullptr)
-            : true;
-    #endif
-    if (!is_write_frequent && is_read_frequent) {
-      return false;
+  BlobFileBuilder::AddOptions blobFileAddOptions = BlobFileBuilder::AddOptions::kDefault;
+  if (freq_check && !compaction_) {
+    blobFileAddOptions = BlobFileBuilder::AddOptions::kForceExtractValue;
+    bool is_write_frequent = false;
+    bool is_read_frequent = false;
+    if (global_frequent_write_key_cache && global_frequent_read_key_cache) {
+      is_write_frequent =
+          (global_frequent_write_key_cache->Lookup(user_key()) != nullptr);
+      is_read_frequent =
+          (global_frequent_read_key_cache->Lookup(user_key()) != nullptr);
+      if (!is_write_frequent && is_read_frequent)
+        blobFileAddOptions = BlobFileBuilder::AddOptions::kForceKeepValue;
+    } else if (global_kv_sep_policy) {
+      bool separate =
+          global_kv_sep_policy->ShouldSeparate(user_key().ToStringView());
+      if (!separate)
+        blobFileAddOptions = BlobFileBuilder::AddOptions::kForceKeepValue;
     }
   }
+    blob_index_.clear();
+    const Status s = blob_file_builder_->Add(user_key(), value_, &blob_index_,
+                                             blobFileAddOptions);
 
-  blob_index_.clear();
-  const Status s = blob_file_builder_->Add(user_key(), value_, &blob_index_);
+    if (!s.ok()) {
+      status_ = s;
+      validity_info_.Invalidate();
 
-  if (!s.ok()) {
-    status_ = s;
-    validity_info_.Invalidate();
+      return false;
+    }
 
-    return false;
+    if (blob_index_.empty()) {
+      return false;
+    }
+
+    value_ = blob_index_;
+
+    return true;
   }
-
-  if (blob_index_.empty()) {
-    return false;
-  }
-
-  value_ = blob_index_;
-
-  return true;
-}
 
 void CompactionIterator::ExtractLargeValueIfNeeded() {
   assert(ikey_.type == kTypeValue);
